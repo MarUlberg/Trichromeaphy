@@ -1,4 +1,4 @@
-# Trichrome
+# Trichromeaphy
 
 A simple Python utility for reconstructing color images from monochrome RGB exposures, without the need for Photoshop or other complicated software. Mainly created for GameBoy Camera pictures, but should work with other monochrome cameras aswell.
 
