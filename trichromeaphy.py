@@ -66,10 +66,10 @@ def align(ref,img):
 
 def apply_sepia_2bit(img):
     palette = np.array([
-        [255, 255, 255],   # #ffffff
-        [  0, 192, 255],   # #ffc000 (BGR)
-        [  0,  96, 160],   # #a06000 (BGR)
-        [  0,   0,   0],   # #000000
+        [255, 255, 255],
+        [ 55, 190, 225],
+        [ 50, 115, 135],
+        [  0,   0,   0],
     ], dtype=np.uint8)
 
     gray = img.astype(np.uint8)
