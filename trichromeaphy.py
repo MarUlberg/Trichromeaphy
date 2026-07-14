@@ -9,7 +9,64 @@ AUTO_LEVEL_CLIP = 0.5
 ADD_FRAME = True
 FRAME_COLOR = "frame-color.png"
 FRAME_ORIGINAL = "frame-original.png"
-FRAME_SEPIA = "frame-sepia.png"
+
+# ----------------------------------------------------------
+# Single-image palette
+# ----------------------------------------------------------
+
+def HEX(rgb):
+    """
+    Convert a HTML hex colour (#RRGGBB) into an OpenCV BGR tuple.
+    """
+    rgb = rgb.lstrip("#")
+    return [
+        int(rgb[4:6], 16),  # B
+        int(rgb[2:4], 16),  # G
+        int(rgb[0:2], 16),  # R
+    ]
+    
+SINGLE_MONOCHROME_PALETTE = "SEPIA"
+
+PALETTES = {
+
+    "CUSTOM": np.array([
+        HEX("#fff8ff"),   # Neon White
+        HEX("#ff5cc8"),   # Hot Pink
+        HEX("#5b5bff"),   # Neon Blue
+        HEX("#14001f"),   # Deep Purple
+    ], dtype=np.uint8),
+
+    "SEPIA": np.array([
+        HEX("#ffffff"),   # White
+        HEX("#ebc88c"),   # Light Sepia
+        HEX("#9b6e46"),   # Dark Sepia
+        HEX("#000000"),   # Black
+    ], dtype=np.uint8),
+
+    "BLACKWHITE": np.array([
+        HEX("#ffffff"),   # White
+        HEX("#cccccc"),   # Light Gray
+        HEX("#666666"),   # Dark Gray
+        HEX("#000000"),   # Black
+    ], dtype=np.uint8),
+
+    # Original Nintendo Game Boy (DMG) LCD
+    "GAMEBOY": np.array([
+        HEX("#9bbc0f"),   # Light Green
+        HEX("#8bac0f"),   # Green
+        HEX("#306230"),   # Dark Green
+        HEX("#0f380f"),   # Very Dark Green
+    ], dtype=np.uint8),
+
+    # Game Boy Player / Super Game Boy amber palette
+    "GAMEBOYPLAYER": np.array([
+        HEX("#ffffff"),   # White
+        HEX("#ffc000"),   # Golden Yellow
+        HEX("#a06000"),   # Brown
+        HEX("#000000"),   # Black
+    ], dtype=np.uint8),
+
+}
 
 # Adjust W coefficients to match your monochrome sensor if needed.
 FILTERS = {
@@ -64,23 +121,101 @@ def align(ref,img):
     except cv2.error:
         return img
 
-def apply_sepia_2bit(img):
-    palette = np.array([
-        [255, 255, 255],
-        [ 55, 190, 225],
-        [ 50, 115, 135],
-        [  0,   0,   0],
-    ], dtype=np.uint8)
+def quantize_2bit(img):
+    """
+    Convert an image to four grayscale levels:
+        255, 192, 120, 0
 
-    gray = img.astype(np.uint8)
+    Accepts grayscale or BGR.
+    Returns a uint8 grayscale image.
+    """
 
-    idx = np.zeros_like(gray, dtype=np.uint8)
-    idx[gray <= 60] = 3          # black
-    idx[(gray > 60) & (gray <= 156)] = 2   # brown (120)
-    idx[(gray > 156) & (gray <= 223)] = 1  # gold (192)
-    idx[gray > 223] = 0          # white
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
 
-    return palette[idx]
+    gray = gray.astype(np.uint8)
+
+    out = np.empty_like(gray)
+
+    out[gray <= 60] = 0
+    out[(gray > 60) & (gray <= 156)] = 120
+    out[(gray > 156) & (gray <= 223)] = 192
+    out[gray > 223] = 255
+
+    return out
+
+def apply_palette(img, quantize=False):
+    """
+    Apply the selected monochrome palette.
+
+    quantize=False:
+        Preserve all 256 grayscale levels by smoothly interpolating
+        through the four palette colours.
+
+    quantize=True:
+        Reduce to the original 4 Game Boy shades.
+    """
+
+    palette = PALETTES.get(
+        SINGLE_MONOCHROME_PALETTE.upper(),
+        PALETTES["SEPIA"]
+    )
+
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
+
+    gray = gray.astype(np.uint8)
+
+    if quantize:
+
+        values = set(np.unique(gray).tolist())
+
+        if not values.issubset({0, 120, 128, 192, 255}):
+            gray = quantize_2bit(gray)
+
+        gray[gray == 128] = 120
+
+        out = np.empty((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
+
+        out[gray == 255] = palette[0]
+        out[gray == 192] = palette[1]
+        out[gray == 120] = palette[2]
+        out[gray ==   0] = palette[3]
+
+        return out
+
+    # ----------------------------------------------------------
+    # Continuous 256-level palette
+    # ----------------------------------------------------------
+
+    lut = np.empty((256, 3), dtype=np.uint8)
+
+    for i in range(256):
+
+        t = i / 255.0
+
+        if t < 1/3:
+            c0 = palette[3]
+            c1 = palette[2]
+            u = t * 3
+
+        elif t < 2/3:
+            c0 = palette[2]
+            c1 = palette[1]
+            u = (t - 1/3) * 3
+
+        else:
+            c0 = palette[1]
+            c1 = palette[0]
+            u = (t - 2/3) * 3
+
+        lut[i] = np.round((1.0 - u) * c0 + u * c1)
+
+    return lut[gray]
     
 def reconstruct(imgs):
     """
@@ -113,7 +248,7 @@ def reconstruct(imgs):
 
         # Luminance or any single filter:
         # simply display it using the sepia palette.
-        return apply_sepia_2bit(img)
+        return apply_palette(img)
         
     chans = list(imgs.keys())
 
@@ -205,14 +340,28 @@ def replace_lum(bgr,lum):
     return cv2.cvtColor(ycc,cv2.COLOR_YCrCb2BGR)
 
 def autolevel(img):
-    out=img.copy()
-    for c in range(3):
-        lo=np.percentile(out[:,:,c],AUTO_LEVEL_CLIP)
-        hi=np.percentile(out[:,:,c],100-AUTO_LEVEL_CLIP)
-        if hi>lo:
-            x=(out[:,:,c].astype(np.float32)-lo)*255/(hi-lo)
-            out[:,:,c]=np.clip(x,0,255)
-    return out.astype(np.uint8)
+    """
+    Auto-level only the luminance channel.
+
+    This preserves the hue of fixed palettes (such as the Game Boy
+    sepia palette) instead of stretching B, G and R independently,
+    which can shift browns toward cyan or blue.
+    """
+
+    ycc = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+
+    y = ycc[:, :, 0].astype(np.float32)
+
+    lo = np.percentile(y, AUTO_LEVEL_CLIP)
+    hi = np.percentile(y, 100.0 - AUTO_LEVEL_CLIP)
+
+    if hi > lo:
+        y = (y - lo) * (255.0 / (hi - lo))
+        y = np.clip(y, 0, 255)
+
+    ycc[:, :, 0] = y.astype(np.uint8)
+
+    return cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
 
 def sat(img,f):
     hsv=cv2.cvtColor(img,cv2.COLOR_BGR2HSV).astype(np.float32)
@@ -225,11 +374,6 @@ def main():
         input()
         return
 
-    # ----------------------------------------------------------
-    # If every dropped image has no channel suffix,
-    # process each one independently as a Game Boy image.
-    # ----------------------------------------------------------
-
     def has_channel(path):
         stem = os.path.splitext(os.path.basename(path))[0]
         parts = stem.split(".")
@@ -238,17 +382,27 @@ def main():
             and parts[-1].lower() in ("l", "r", "g", "b", "c", "m", "y")
         )
 
-    if len(sys.argv) > 2 and not any(has_channel(p) for p in sys.argv[1:]):
+    # ----------------------------------------------------------
+    # Standalone monochrome mode
+    # (single image OR batch of ordinary images)
+    # ----------------------------------------------------------
+
+    if len(sys.argv) == 2 or not any(has_channel(p) for p in sys.argv[1:]):
+
+        preview = (len(sys.argv) == 2)
 
         for first in sys.argv[1:]:
 
-            img = cv2.imread(first, 0)
+            img = cv2.imread(first, cv2.IMREAD_GRAYSCALE)
             if img is None:
                 continue
 
-            bgr = apply_sepia_2bit(img)
-            bgr = autolevel(bgr)
-            bgr = sat(bgr, SATURATION)
+            quantize = (
+                img.shape[1] == 128 and
+                img.shape[0] == 112
+            )
+
+            bgr = apply_palette(img, quantize=quantize)
 
             base = os.path.basename(first)
             stem, ext = os.path.splitext(base)
@@ -261,15 +415,16 @@ def main():
             if (
                 ADD_FRAME
                 and first.lower().endswith(".bmp")
-                and bgr.shape[1] == 128
-                and bgr.shape[0] == 112
+                and quantize
             ):
                 frame = cv2.imread(
-                    os.path.join(os.path.dirname(__file__), FRAME_SEPIA),
-                    cv2.IMREAD_COLOR
+                    os.path.join(os.path.dirname(__file__), FRAME_ORIGINAL),
+                    cv2.IMREAD_GRAYSCALE
                 )
 
                 if frame is not None:
+                    frame = apply_palette(frame, quantize=True)
+
                     framed = frame.copy()
                     framed[16:128, 16:144] = bgr
                     bgr = framed
@@ -277,14 +432,23 @@ def main():
             cv2.imwrite(out, bgr, [cv2.IMWRITE_JPEG_QUALITY, 98])
             print("Saved", out)
 
+            if preview:
+                cv2.imshow("Result", bgr)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
+
         return
-        
+
+    # ----------------------------------------------------------
+    # Multi-image reconstruction
+    # ----------------------------------------------------------
+
     imgs = {}
     first = None
 
     for p in sys.argv[1:]:
         ch = get_channel(p)
-        im = cv2.imread(p, 0)
+        im = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
         if im is None:
             continue
         imgs[ch] = im
@@ -304,9 +468,9 @@ def main():
     bgr = autolevel(bgr)
     bgr = sat(bgr, SATURATION)
 
-    order = ["l", "r", "g", "b", "c", "m", "y"]
     supplied = []
-    for ch in order:
+
+    for ch in ["l", "r", "g", "b", "c", "m", "y"]:
         if ch == "l":
             if "w" in imgs:
                 supplied.append("l")
@@ -314,57 +478,21 @@ def main():
             supplied.append(ch)
 
     suffix = "".join(supplied)
+
     base = os.path.basename(first)
-    stem, ext = os.path.splitext(base)
+    parts = base.split(".")
 
-    if len(imgs) == 1:
-        # Single-image mode:
-        # garfield.l.jpg -> garfield.gb.jpg
-        # flower.r.png   -> flower.gb.png
-
-        parts = stem.split(".")
-
-        if len(parts) >= 2:
-            parts[-1] = "gb"
-            stem = ".".join(parts)
-        else:
-            stem = stem + ".gb"
-
-        out = os.path.join(
-            os.path.dirname(first),
-            stem + ext
-        )
-
+    if len(parts) >= 3:
+        parts[-2] = suffix
+        out = ".".join(parts)
     else:
-        order = ["l", "r", "g", "b", "c", "m", "y"]
-        supplied = []
+        stem, ext = os.path.splitext(base)
+        out = f"{stem}.{suffix}{ext}"
 
-        for ch in order:
-            if ch == "l":
-                if "w" in imgs:
-                    supplied.append("l")
-            elif ch in imgs:
-                supplied.append(ch)
-
-        suffix = "".join(supplied)
-
-        parts = base.split(".")
-
-        if len(parts) >= 3:
-            parts[-2] = suffix
-            out = ".".join(parts)
-        else:
-            stem, ext = os.path.splitext(base)
-            out = f"{stem}.{suffix}{ext}"
-
-        out = os.path.join(
-            os.path.dirname(first),
-            out
-        )
-
-    # ----------------------------------------------------------
-    # Optional decorative frame
-    # ----------------------------------------------------------
+    out = os.path.join(
+        os.path.dirname(first),
+        out
+    )
 
     if (
         ADD_FRAME
@@ -373,13 +501,7 @@ def main():
         and bgr.shape[0] == 112
     ):
 
-        # Choose frame based on number of input images
-        if len(imgs) == 1:
-            frame_name = FRAME_SEPIA
-        elif len(imgs) == 2:
-            frame_name = FRAME_ORIGINAL
-        else:
-            frame_name = FRAME_COLOR
+        frame_name = FRAME_ORIGINAL if len(imgs) <= 2 else FRAME_COLOR
 
         frame_path = os.path.join(
             os.path.dirname(__file__),
@@ -395,15 +517,16 @@ def main():
                 and frame.shape[1] >= 160
                 and frame.shape[0] >= 144
             ):
-
                 framed = frame.copy()
                 framed[16:128, 16:144] = bgr
                 bgr = framed
 
     cv2.imwrite(out, bgr, [cv2.IMWRITE_JPEG_QUALITY, 98])
     print("Saved", out)
+
     cv2.imshow("Result", bgr)
     cv2.waitKey(0)
+    cv2.destroyAllWindows()
     
 if __name__=="__main__":
     main()
