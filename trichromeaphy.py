@@ -11,8 +11,10 @@ FRAME_COLOR = "frame-color.png"
 FRAME_ORIGINAL = "frame-original.png"
 
 # ----------------------------------------------------------
-# Single-image palette
+# Monochrome-image palette
 # ----------------------------------------------------------
+
+SINGLE_MONOCHROME_PALETTE = "BLACKWHITE"
 
 def HEX(rgb):
     """
@@ -24,8 +26,6 @@ def HEX(rgb):
         int(rgb[2:4], 16),  # G
         int(rgb[0:2], 16),  # R
     ]
-    
-SINGLE_MONOCHROME_PALETTE = "SEPIA"
 
 PALETTES = {
 
