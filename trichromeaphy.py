@@ -2,8 +2,8 @@ import os, sys
 import cv2
 import numpy as np
 
-SATURATION = 1.15
-AUTO_LEVEL_CLIP = 0.5
+SATURATION = 1.00
+AUTO_LEVEL_CLIP = 0.15
 
 # Add decorative frame around 128x112 BMP images
 ADD_FRAME = True
@@ -219,40 +219,42 @@ def apply_palette(img, quantize=False):
     
 def reconstruct(imgs):
     """
-    Reconstruct an RGB image from any combination of filters.
+    RGB reconstruction using a calibrated filter matrix.
 
-    Supports:
-        L
-        R
-        G
-        B
-        C
-        M
-        Y
-
-    in any quantity (1-7 channels).
-
-    If fewer than three independent color measurements are available,
-    a least-squares reconstruction is performed and missing color
-    information is approximated from luminance (or the first supplied
-    image if luminance isn't present).
+    Works with:
+        R G B
+        L+R+G+B
+        Any subset of RGB
+        White channel optional
     """
 
-    # ----------------------------------------------------------
-    # Single-channel images
-    # ----------------------------------------------------------
-
     if len(imgs) == 1:
-
         ch, img = next(iter(imgs.items()))
-
-        # Luminance or any single filter:
-        # simply display it using the sepia palette.
         return apply_palette(img)
-        
+
     chans = list(imgs.keys())
 
-    A = np.stack([FILTERS[c] for c in chans]).astype(np.float32)
+    # ----------------------------------------------------------
+    # Measured filter response
+    #
+    # Rows = filters
+    # Cols = sensor response to R,G,B
+    #
+    # Adjust these numbers after calibration.
+    # These are a much better starting point than identity.
+    # ----------------------------------------------------------
+
+    FILTER_MATRIX = {
+        "r": [0.94, 0.12, 0.02],
+        "g": [0.16, 0.90, 0.18],
+        "b": [0.05, 0.23, 0.88],
+        "w": [0.33, 0.34, 0.33],
+    }
+
+    A = np.array(
+        [FILTER_MATRIX[c] for c in chans],
+        dtype=np.float32
+    )
 
     h, w = next(iter(imgs.values())).shape
 
@@ -261,27 +263,20 @@ def reconstruct(imgs):
         axis=-1
     ).astype(np.float32)
 
-    # Solve using the Moore-Penrose pseudoinverse.
-    # Works for any number of channels, even rank-deficient cases.
     pinv = np.linalg.pinv(A)
 
     rgb = stack.reshape(-1, len(chans)) @ pinv.T
     rgb = rgb.reshape(h, w, 3)
 
-    # ----------------------------------------------------------
-    # If the supplied filters cannot uniquely determine RGB,
-    # approximate missing color information.
-    # ----------------------------------------------------------
-
+    # Fill missing channels from luminance if necessary
     if np.linalg.matrix_rank(A) < 3:
 
         if "w" in imgs:
             lum = imgs["w"].astype(np.float32)
         else:
-            lum = next(iter(imgs.values())).astype(np.float32)
+            lum = np.mean(rgb, axis=2)
 
-        # Which RGB components are unconstrained?
-        constrained = np.any(np.abs(A) > 1e-6, axis=0)
+        constrained = np.any(np.abs(A) > 0.05, axis=0)
 
         for i in range(3):
             if not constrained[i]:
@@ -290,49 +285,60 @@ def reconstruct(imgs):
     rgb = np.clip(rgb, 0, 255)
 
     # ----------------------------------------------------------
-    # Empirical correction for L+R+G (missing blue)
+    # Gray-world white balance
     # ----------------------------------------------------------
 
-    if set(chans) == {"w", "r", "g"}:
+    means = rgb.reshape(-1, 3).mean(axis=0)
 
-        b = rgb[:, :, 2]
+    target = means.mean()
 
-        b = (
-            b * 1.35 +
-            rgb[:, :, 1] * 0.12
-        )
+    rgb *= target / np.maximum(means, 1)
 
-        b = cv2.GaussianBlur(b, (0, 0), 0.8)
-
-        rgb[:, :, 2] = np.clip(b, 0, 255)
+    rgb = np.clip(rgb, 0, 255)
 
     # ----------------------------------------------------------
-    # Empirical correction for L+G+B (missing red)
+    # Chroma stretch
+    # Makes colors much stronger without blowing highlights
     # ----------------------------------------------------------
 
-    elif set(chans) == {"w", "g", "b"}:
-
-        r = (
-            rgb[:, :, 0] * 1.12 +
-            rgb[:, :, 1] * 0.05
-        )
-
-        rgb[:, :, 0] = np.clip(r, 0, 255)
+    bgr = cv2.merge((
+        rgb[:, :, 2],
+        rgb[:, :, 1],
+        rgb[:, :, 0],
+    )).astype(np.float32)
 
     # ----------------------------------------------------------
-    # Empirical correction for L+R+B (missing green)
+    # Color correction matrix
+    #
+    # Rows = output R,G,B
+    # Cols = reconstructed R,G,B
     # ----------------------------------------------------------
 
-    elif set(chans) == {"w", "r", "b"}:
+    CCM = np.array([
+        [ 1.32, -0.18, -0.14],
+        [-0.12,  1.24, -0.12],
+        [-0.18, -0.22,  1.40],
+    ], dtype=np.float32)
 
-        rgb[:, :, 1] *= 0.97
-        rgb[:, :, 1] = np.clip(rgb[:, :, 1], 0, 255)
+    rgb = bgr[:, :, ::-1].reshape(-1,3)
 
-    return cv2.merge((
-        rgb[:, :, 2].astype(np.uint8),
-        rgb[:, :, 1].astype(np.uint8),
-        rgb[:, :, 0].astype(np.uint8),
-    ))
+    rgb = rgb @ CCM.T
+
+    rgb = np.clip(rgb,0,255)
+
+    bgr = rgb.reshape(bgr.shape)[:,:,::-1].astype(np.uint8)
+
+    # Moderate chroma boost
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+
+    L,A,B = cv2.split(lab)
+
+    strength = 1.10
+
+    A = np.clip((A.astype(np.float32)-128)*strength+128,0,255).astype(np.uint8)
+    B = np.clip((B.astype(np.float32)-128)*strength+128,0,255).astype(np.uint8)
+
+    return cv2.cvtColor(cv2.merge((L,A,B)),cv2.COLOR_LAB2BGR)
     
 def replace_lum(bgr,lum):
     ycc=cv2.cvtColor(bgr,cv2.COLOR_BGR2YCrCb)
